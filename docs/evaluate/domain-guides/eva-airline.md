@@ -19,8 +19,10 @@ limitations under the License.
 
 `eva_airline` is a 50-scenario airline customer-service benchmark ported from
 [ServiceNow/eva](https://github.com/ServiceNow/eva) (v0.1.3, MIT). In each scenario, a simulated passenger
-calls the agent to change a flight, recover from a cancellation, request a refund, or challenge a fabricated
-disruption claim.
+calls the agent for the fictional carrier SkyWay Airlines to change a flight, recover from a cancellation,
+request a refund, or challenge a fabricated disruption claim. The carrier name is the quickest way to
+recognize the domain in a transcript or a fixture: every flight number carries the `SK` prefix, as in
+`SK621`.
 
 Scoring is deterministic. Every scenario ships a gold post-run database from upstream, so the run is scored
 by hashing the agent's final database rather than by a large language model (LLM) judge.
@@ -96,6 +98,12 @@ nothing else. `EvaAirlineBaseScenario` derives the rest lazily through `cached_p
 The dataset index is loaded one time per process by `_load_eva_airline_dataset_index()`, cached with
 `functools.cache`. An `eva_id` with no dataset entry raises `KeyError` when `expected_scenario_db` is first
 touched.
+
+The 900-second cap is sized for voice pacing rather than text. A healthy run spends roughly 30 to 40
+seconds per round trip, and observed live runs of `eva_airline__voluntary_date_change` take 12 to 14 turns
+even when the agent works efficiently. The closing protocol alone — confirm the change, ask whether
+anything else is needed, say goodbye — costs another 3 to 4 turns after the work itself is done, which is
+why 600 seconds leaves no headroom. Pass `--duration` to override the per-scenario value for a whole run.
 
 `setup_shared_state(state, side)` seeds the **agent** side only: it assigns the whole scenario database
 inline to `state["db"]`. The eva fixtures are approximately 10–30 KB each, so they fit in the
@@ -178,7 +186,7 @@ The domain whitelists two of the six scoring signals:
 | Signal | How It Is Produced |
 | --- | --- |
 | `db_state_match` | The bot hashes its own `shared_state["db"]` and returns the SHA-256 string in the `get_scenario_summary` response, alongside the recorded action list. The runner hashes `scenario.expected_scenario_db` from its in-process gold replay and compares strings. The database itself never crosses the WebSocket. |
-| `clean_exit` | The agent called `EndConversationTool` and the conversation terminated normally. |
+| `clean_exit` | The conversation satisfied the selected end policy. The default requires `EndConversationTool`. |
 
 Hash matching is path-independent: any sequence of tool calls that lands on the gold end state passes.
 Both sides import the same canonicalization module, `nemo_voice_agent/evaluation/db_hash.py`, so the two
@@ -186,7 +194,7 @@ hashes are comparable byte for byte.
 
 No eva_airline scenario declares a `reference_answer`, so `is_action_match` does not participate — the
 commented-out block in `VoluntaryDateChange` is kept only as a worked example of the action-list shape.
-Scenarios that complete fewer than `--min-agent-turns` agent turns (default `3`) are counted as failures
+Scenarios that complete fewer than `--min-agent-turns` agent turns (default `2`) are counted as failures
 in the composite rate and skipped in the per-signal rates. Details in [Scoring](../understand-scoring/scoring.md) and
 [Metrics reference](../../reference/evaluation/metrics.md).
 

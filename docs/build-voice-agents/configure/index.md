@@ -18,9 +18,9 @@ limitations under the License.
 # Configuration Model
 
 NeMo Labs Voice Agent is configured by YAML. One top-level server config selects the models and pipeline
-behavior. The speech-to-text (STT), large language model (LLM), and text-to-speech (TTS) components can also
-load a per-model sub-config. `ConfigManager` (`nemo_voice_agent/utils/config_manager.py`) merges these files
-before the example server builds any pipeline stage.
+behavior. The speech-to-text (STT), speaker diarization, large language model (LLM), and text-to-speech (TTS)
+components can also load a per-model sub-config. `ConfigManager` (`nemo_voice_agent/utils/config_manager.py`)
+merges these files before the example server builds any pipeline stage.
 
 ## Where the Files Live
 
@@ -33,6 +33,7 @@ examples/generic_voice_agent/server/
     ├── default.yaml             # the shipped top-level config
     ├── default_nvidia.yaml      # top-level config for hosted NIM endpoints
     ├── stt_configs/             # per-ASR-model sub-configs
+    ├── diar_configs/            # per-diarization-model streaming settings
     ├── llm_configs/             # per-LLM sub-configs
     └── tts_configs/             # per-TTS-model sub-configs
 ```
@@ -55,28 +56,29 @@ SERVER_CONFIG_PATH=server_configs/default_nvidia.yaml python server.py
 | Layer | What It Sets | How It Is Selected |
 | --- | --- | --- |
 | 1. Top-level config | Every block: `server`, `transport`, `vad`, `stt`, `diar`, `turn_taking`, `llm`, `tts` | `SERVER_CONFIG_PATH`, else `server_configs/default.yaml` |
-| 2. Component sub-config | Keys inside one of `stt` / `llm` / `tts` only | That block's `model_config:` field |
+| 2. Component sub-config | Keys inside one of `stt` / `diar` / `llm` / `tts` only | That block's `model_config:` field |
 | 3. Model registry | Supplies the sub-config filename when `model_config:` is absent | `server.use_model_registry: true` (the default) plus a matching `model:` id |
 
 Layers 2 and 3 are alternatives, not additions: `model_config:` short-circuits the registry lookup entirely.
 
 ### The Sub-Config Wins
 
-For STT, LLM, and TTS, the merge loop copies **every** sub-config key over the corresponding key in the
-top-level block. The sub-config overrides the top-level file.
+For STT, diarization, LLM, and TTS, the merge loop copies **every** sub-config key over the corresponding key
+in the top-level block. The sub-config overrides the top-level file. The diarization sub-config is merged only
+when `diar.enabled` is true.
 
 The shipped default demonstrates it. `default.yaml` declares `llm.type: auto`, but
-`llm_configs/nemotron_nano_v3.yaml` (selected by `llm.model_config:`) declares `type: vllm`, so the effective
+`llm_configs/nemotron_3.5_lightning.yaml` (selected by `llm.model_config:`) declares `type: vllm`, so the effective
 backend is `vllm`. `ConfigManager` logs every such replacement:
 
 ```
-LLM config field `type` is overridden from `auto` to `vllm` by .../llm_configs/nemotron_nano_v3.yaml
+LLM config field `type` is overridden from `auto` to `vllm` by .../llm_configs/nemotron_3.5_lightning.yaml
 ```
 
 Practical consequence: editing a key in `default.yaml` that the sub-config also sets has no effect. Change it in
 the sub-config, or point `model_config:` at a copy you own. Keys the sub-config does not mention (`model`,
 `enable_reasoning`, `function_call_timeout_secs`, `system_prompt`, …) keep their top-level values. `device` is
-*not* one of them — `nemotron_nano_v3.yaml` sets `device: "cuda"` itself, so a `device` you edit in
+*not* one of them — `nemotron_3.5_lightning.yaml` sets `device: "cuda"` itself, so a `device` you edit in
 `default.yaml` is silently replaced by the sub-config's value.
 
 The merge is a shallow, per-key replacement within the block. If a sub-config defines a nested mapping such as
@@ -86,7 +88,7 @@ The merge is a shallow, per-key replacement within the block. If a sub-config de
 
 `ConfigManager` takes `os.path.basename()` of `model_config:` and looks the file up in
 `<base>/server_configs/<component>_configs/`. The directory portion of the shipped values
-(`./server_configs/llm_configs/nemotron_nano_v3.yaml`) is decorative — a sub-config must physically live in the
+(`./server_configs/llm_configs/nemotron_3.5_lightning.yaml`) is decorative — a sub-config must physically live in the
 component's own directory next to the top-level file. A missing file raises `FileNotFoundError` at startup.
 
 ### Registry Auto-Resolution
@@ -112,8 +114,8 @@ difference matters:
   before any sub-config is merged. An interpolation here can only reference keys present in the same file.
   Referencing one that only a sub-config supplies raises `InterpolationKeyError` at startup.
 - **Sub-config: resolved lazily against the merged root.** Sub-config values are copied over verbatim and
-  resolved on access, against the *final merged* server config. That is why `llm_configs/nemotron_nano_v3.yaml`
-  can write the following and get `0.6` and `1024` — the values its own file contributed to `llm.temperature`
+  resolved on access, against the *final merged* server config. That is why `llm_configs/nemotron_3.5_lightning.yaml`
+  can write the following and get `1.0` and `1024` — the values its own file contributed to `llm.temperature`
   and `llm.max_new_tokens`:
 
 ```yaml
@@ -130,7 +132,9 @@ Paths in interpolations are absolute from the config root (`llm.temperature`), n
 `llm.system_prompt` is **path-or-literal**: `ConfigManager` runs `os.path.isfile()` on the value and reads the
 file when it exists, otherwise treats the string as the prompt itself. Relative paths resolve against the
 current working directory, not the server base path. Reusable prompts ship in
-`examples/generic_voice_agent/server/example_prompts/`.
+`examples/generic_voice_agent/server/example_prompts/`. The `stt.system_prompt` and `stt.user_prompt` keys of
+the `nemo_speechlm` backend follow the same rule, so a prompt file works unchanged in either block. Refer to
+[ASR](../../about/core-concepts/speech-pipeline/asr.md#prompt-files).
 
 `llm.system_prompt_suffix` is appended to whichever prompt was chosen, separated by a newline. The shipped
 default combines a literal prompt from `default.yaml` with a tool-usage suffix from the LLM sub-config. Omit
@@ -147,8 +151,8 @@ reads one block of the merged config:
 | `transport` | — | `build_ws_transport`, `build_audio_logger` |
 | `vad` | — | `build_vad_analyzer` (Silero `VADParams`) |
 | `stt` | `stt_configs/` | `build_stt` |
-| `diar` | — | `build_diar`; returns `None` when `diar.enabled` is false |
-| `turn_taking` | — | `build_turn_taking`; returns `None` when `turn_taking.enabled` is false |
+| `diar` | `diar_configs/` | `build_diar`; returns `None` when `diar.enabled` is false |
+| `turn_taking` | — | `build_turn_taking`; `turn_taking.type` selects `nemo` or `speech_timeout`, and returns `None` for `speech_timeout` |
 | `llm` | `llm_configs/` | `build_llm`; `llm.type` selects `auto`, `hf`, `vllm`, or `nvidia` |
 | `tts` | `tts_configs/` | `build_tts` and `build_llm_text_processor` |
 
@@ -163,21 +167,27 @@ vLLM can load the model and falls back to the Hugging Face backend if not. Refer
 
 ## Inspecting the Merged Result
 
-The startup log is the source of truth. `ConfigManager` emits `Final STT config:`, `Final LLM config:`, and
-`Final TTS config:` lines after each merge. It also emits one `... is overridden from ... by ...` line per
-replaced key. The example server then logs the fully resolved config as `Server config:`. Check those lines whenever a
-setting appears to be ignored — the override log names the file that won.
+The startup log is the source of truth. `ConfigManager` emits `Final STT config:`, `Final diarization config:`,
+`Final LLM config:`, and `Final TTS config:` lines after each merge. The diarization line appears only when
+diarization is enabled and a sub-config was merged. It also emits one `... is overridden from ... by ...` line per
+replaced key. The example server then logs the fully resolved config as `Server config:`. Check those lines
+whenever a setting appears to be ignored — the override log names the file that won. In these log lines, any
+non-empty value of `api_key` or of a key that ends in `_api_key` appears as `<redacted>`, including inside an
+overridden mapping. An `--api-key` value inside `llm.vllm_server_params` also appears as `<redacted>`.
 
 ## Gotchas
 
 Keep these merge and path behaviors in mind when a configuration edit does not take effect:
 
-- The shipped `llm_configs/nemotron_nano_v3.yaml` sets `start_vllm_on_init: false`, so `python server.py` alone
+- The shipped `llm_configs/nemotron_3.5_lightning.yaml` sets `start_vllm_on_init: false`, so `python server.py` alone
   does not work by itself. Start vLLM first, or change that key. Refer to
   [vLLM Backend](../model-serving/vllm.md).
+- `turn_taking.type` replaced the boolean `turn_taking.enabled`. A config that still sets `enabled` gets a
+  startup warning naming the mapping and falls back to the `nemo` default: use `type: nemo` in place of
+  `enabled: true`, and `type: speech_timeout` in place of `enabled: false`.
 - `turn_taking.backchannel_phrases_path` is tried against the working directory first, then against the server
   base path, and raises `FileNotFoundError` naming both if neither exists. An inline list or `null` is also
-  accepted — `null` lets any speech interrupt the bot.
+  accepted — `null` lets any speech interrupt the bot. It applies to `type: nemo` only.
 - Only one client can be connected at a time. A second connection is rejected with WebSocket close code 1013,
   and the incumbent is kept. No config key changes this.
 

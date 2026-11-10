@@ -37,7 +37,7 @@ Complete these four steps in order to start the services and connect from the br
 ### Start vLLM Yourself
 
 This is the most common first-run failure. The shipped default large language model (LLM) configuration
-(`examples/generic_voice_agent/server/server_configs/llm_configs/nemotron_nano_v3.yaml`) sets
+(`examples/generic_voice_agent/server/server_configs/llm_configs/nemotron_3.5_lightning.yaml`) sets
 `start_vllm_on_init: false`. As a result, `python server.py` does not start a model. The agent server starts
 and then fails to reach the OpenAI-compatible endpoint at `http://localhost:8000/v1`.
 
@@ -46,7 +46,7 @@ YAML file is the authoritative source if this example differs from the current c
 
 ```bash
 source .venv/bin/activate
-vllm serve nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4 \
+vllm serve nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
     --trust-remote-code --tensor-parallel-size 1 --enable-prefix-caching \
     --max-num-seqs 1 --gpu-memory-utilization 0.8 \
     --enable-auto-tool-choice --tool-call-parser qwen3_coder \
@@ -145,6 +145,30 @@ LLM run when the client reports ready. You hear the greeting from the system pro
 
 If a service does not start or the browser cannot connect, use
 [Troubleshooting](../troubleshooting/index.md) to diagnose the symptom.
+
+## Access the Agent From Another Machine
+
+The defaults assume that the browser and the server run on the same machine. Two settings change when you
+browse from a different machine. Both produce confusing failures when you miss them, because the page
+loads normally either way.
+
+1. Export `SERVER_PUBLIC_HOST` before you start the server. The `/connect` endpoint advertises this
+   address to the browser, and the default of `127.0.0.1` resolves to the browser's own machine. The
+   result is a successful `/connect` request followed by a WebSocket connection failure. Set
+   `WEBSOCKET_SCHEME` to `wss` only when you terminate TLS in front of the server.
+
+   ```bash
+   export SERVER_PUBLIC_HOST="10.0.0.5"   # hostname or IP that the browser dials
+   export WEBSOCKET_SCHEME="wss"          # only behind TLS termination
+   cd examples/generic_voice_agent/server && python server.py
+   ```
+
+2. Add the client origin to the Chrome insecure-origin allowlist. Microphone capture requires a secure
+   context, and `http://<your-machine-ip>:5173/` is not one, so the **Connect** button fails when it
+   requests the microphone. Refer to [Connect From the Browser](#connect-from-the-browser).
+
+The client needs no change. It derives its own base URL from the browser address bar, and the Vite dev
+server in `examples/generic_voice_agent/client/vite.config.js` already binds `0.0.0.0`.
 
 ## Controls
 

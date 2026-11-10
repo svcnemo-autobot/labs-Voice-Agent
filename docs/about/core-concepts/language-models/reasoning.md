@@ -21,7 +21,7 @@ Reasoning (thinking) mode is **off by default** in NeMo Labs Voice Agent. A reas
 reasoning block before its spoken answer. In a voice pipeline, no content reaches text-to-speech (TTS)
 until that block closes. `default.yaml` therefore ships `llm.enable_reasoning: false` to minimize latency,
 and the default large language model (LLM) sub-configuration
-(`server_configs/llm_configs/nemotron_nano_v3.yaml`) sends `enable_thinking: False` to vLLM.
+(`server_configs/llm_configs/nemotron_3.5_lightning.yaml`) sends `enable_thinking: False` to vLLM.
 
 Enable reasoning when answer quality on multi-step or tool-heavy tasks is more important than time to first audio.
 
@@ -46,8 +46,9 @@ The following settings and configuration files control whether reasoning runs an
    and marks the configuration as non-registry.
 3. The model entry in `server/model_registry.yaml` has `reasoning_supported: true`.
 
-Only then is the resolved path rewritten from `<name>.yaml` to `<name>_think.yaml`. Today
-`Qwen/Qwen3-8B` is the sole registry entry with `reasoning_supported: true`.
+Only then is the resolved path rewritten from `<name>.yaml` to `<name>_think.yaml`. Registry entries with
+`reasoning_supported: true` include `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4`, `Qwen/Qwen3-8B`,
+`Qwen/Qwen3.6-35B-A3B`, and `Qwen/Qwen3.8-27B`.
 
 Because `default.yaml` pins `llm.model_config` explicitly, **the swap does not occur for the shipped
 default model.** Point `model_config` at the think variant explicitly.
@@ -60,12 +61,12 @@ Edit `examples/generic_voice_agent/server/server_configs/default.yaml`:
 
 ```yaml
 llm:
-  model: "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4"
-  model_config: "./server_configs/llm_configs/nemotron_nano_v3_think.yaml"
+  model: "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"
+  model_config: "./server_configs/llm_configs/nemotron_3.5_lightning_think.yaml"
   enable_reasoning: true   # documentary here; the think config is what actually flips the model
 ```
 
-The sub-YAML **overrides** `default.yaml`, so settings in `nemotron_nano_v3_think.yaml`, including
+The sub-YAML **overrides** `default.yaml`, so settings in `nemotron_3.5_lightning_think.yaml`, including
 `type: vllm` and `max_new_tokens`, take precedence. For details, refer to
 [Server Configuration](../../../build-voice-agents/configure/server-config.md). To avoid editing the shipped
 file, copy it and select the copy at launch:
@@ -111,6 +112,36 @@ llm:
 For endpoint configuration, refer to
 [NVIDIA NIM Endpoints](../../../build-voice-agents/model-serving/nvidia-nim.md).
 
+### Route 4 — Set the Chat-Template Flag on the Hugging Face Backend
+
+With `llm.type: hf` there is no OpenAI request body to interpolate into and no `--reasoning-parser`,
+so whether the model reasons is decided entirely by the prompt the chat template renders. Two settings
+reach it:
+
+- **`llm.system_prompt_suffix`** — a string appended to the system prompt by `ConfigManager`, so it
+  applies on every backend. Many models switch on `/think` or `/no_think` here, and this is the
+  mechanism the shipped `qwen3-8B.yaml` and `qwen3-8B_think.yaml` pair uses.
+- **`llm.apply_chat_template_kwargs.enable_thinking`** — set it to `true` or `false` for models whose
+  chat template reads that keyword. The dictionary is forwarded verbatim into
+  `tokenizer.apply_chat_template()` by `HuggingFaceLLMLocalService`, so any keyword the template
+  accepts works the same way. Only `tokenize` is special-cased: it is forced to `False`, and a `True`
+  value is dropped with a warning.
+
+```yaml
+llm:
+  type: hf
+  model: "Qwen/Qwen3-8B"
+  apply_chat_template_kwargs:
+    add_generation_prompt: true
+    tokenize: false
+    enable_thinking: true
+```
+
+Which of the two a model honors is model-specific — check its model card, for example
+[Qwen/Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B). No shipped configuration sets `enable_thinking`
+in the Hugging Face block, so you add it yourself. Because this route has no server-side parser,
+`tts.think_tokens` is the only thing keeping the reasoning span out of the audio.
+
 ## How Think Configuration Variants Work
 
 Each `_think.yaml` variant changes only the settings listed below.
@@ -119,6 +150,7 @@ Comparing each pair shows the complete difference. The rest of each configuratio
 
 | Pair | Difference |
 | --- | --- |
+| `nemotron_3.5_lightning.yaml` to `nemotron_3.5_lightning_think.yaml` | Changes `enable_thinking` to `True`, raises `max_new_tokens` from 1024 to 4096, and adds `thinking_budget: 2048`, passed on as `thinking_token_budget`. |
 | `nemotron_nano_v3.yaml` to `nemotron_nano_v3_think.yaml` | Changes `enable_thinking` to `True`, raises `max_new_tokens` from 1024 to 4096, and adds `thinking_budget: 2048`, passed on as `thinking_token_budget`. |
 | `nemotron_nano_v3_omni.yaml` to `nemotron_nano_v3_omni_think.yaml` | Applies the same three changes and moves sampling from near-greedy (`temperature: 0.2`, `top_k: 1`) to `temperature: 0.6` and `top_p: 0.95`. |
 | `qwen3-8B.yaml` to `qwen3-8B_think.yaml` | Changes `system_prompt_suffix` from `/no_think` to `/think` and drops the `extra_body` block that forced thinking off. |
@@ -159,15 +191,16 @@ The shipped configurations use the following reasoning parsers:
 
 | Configuration | Reasoning Parser |
 | --- | --- |
+| `llm_configs/nemotron_3.5_lightning*.yaml` (including think) | `nemotron_v3` (vLLM built-in) |
 | `llm_configs/nemotron_nano_v3*.yaml` (including omni and think) | `nemotron_v3` (vLLM built-in) |
 | `evaluation/server_configs/agent.yaml`, `user.yaml` | `deepseek_r1` |
 | All other shipped LLM configurations | None |
 
-Because `nemotron_nano_v3.yaml` sets `start_vllm_on_init: false`, you launch vLLM yourself with the
+Because `nemotron_3.5_lightning.yaml` sets `start_vllm_on_init: false`, you launch vLLM yourself with the
 same flags the configuration expects:
 
 ```bash
-vllm serve nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4 \
+vllm serve nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
   --trust-remote-code --tensor-parallel-size 1 --enable-prefix-caching \
   --max-num-seqs 1 --gpu-memory-utilization 0.8 \
   --enable-auto-tool-choice --tool-call-parser qwen3_coder \
@@ -182,7 +215,7 @@ Two independent mechanisms bound reasoning time:
 
 - **`llm.thinking_budget`** — used by the think configurations, forwarded to the server as
   `thinking_token_budget` inside `vllm_generation_params.extra.extra_body`. Models or servers that implement
-  that field, including Nemotron-3 Nano and hosted NIM, honor the setting.
+  that field, including Nemotron-3.5-Lightning, Nemotron-3 Nano, and hosted NIM, honor the setting.
 - **`ReasoningBudgetLogitsProcessor`** — a vLLM plugin shipped in this repository
   (`nemo_voice_agent/vllm/v1/sample/logits_processor/`) that counts tokens inside the thinking block
   and forces the closing sequence when the budget is hit. It is loaded with `--logits-processors` and

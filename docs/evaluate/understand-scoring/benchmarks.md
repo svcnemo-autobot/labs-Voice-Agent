@@ -28,7 +28,7 @@ The catalog distinguishes benchmark-derived domains from smaller in-repository v
 | Domain | Scenarios | Upstream | License | Gating Signals |
 | --- | --- | --- | --- | --- |
 | `eva_airline` | 50 | [ServiceNow/eva](https://github.com/ServiceNow/eva) 0.1.3 | MIT | `DB_STATE_MATCH`, `CLEAN_EXIT` |
-| `tau2_airline` | 50 | [sierra-research/tau2-bench](https://github.com/sierra-research/tau2-bench) | MIT | `DB_STATE_MATCH`, `CLEAN_EXIT` |
+| `tau2_airline` | 50 | [sierra-research/tau2-bench](https://github.com/sierra-research/tau2-bench) | MIT | `DB_STATE_MATCH`, `CLEAN_EXIT`, plus `NL_ASSERTION` on the 24 tasks with adopted assertions |
 | `tau2_retail` | 114 | tau2-bench | MIT | `DB_STATE_MATCH`, `CLEAN_EXIT`, plus `NL_ASSERTION` on the 40 tasks that carry one |
 | `tau2_telecom` | 114 | tau2-bench | MIT | `DB_STATE_ASSERTION`, `CLEAN_EXIT` |
 | `tau2_telecom_workflow` | 114 | tau2-bench | MIT | same as `tau2_telecom` |
@@ -88,10 +88,13 @@ Each domain has its own page with the task shape, tool surface, and known caveat
   `EndConversationTool`.
 - [tau2_airline](../domain-guides/tau2-airline.md) — the 50 IDs in tau2-bench's `base` split. The agent prompt is
   the upstream `policy.md` verbatim plus a short voice-realization appendix, which keeps scores comparable to
-  the published tau2 voice numbers. Agent tool surface: 14 tools plus `EndConversationTool`.
+  the published tau2 voice numbers. Agent tool surface: 14 tools plus `EndConversationTool`. Airline scores 84
+  curated NL assertions across 24 tasks, defined in code rather than read from the fixture, and drops one
+  upstream gold action that its own policy forbids, which makes task `39` intentionally non-comparable to the
+  published leaderboard.
 - [tau2_retail](../domain-guides/tau2-retail.md) — the 114 IDs in the retail `base` split. 40 of them carry
-  `nl_assertions` (natural-language claims judged by the LLM judge). The rest are action/DB-only. Agent tool
-  surface: 16 tools plus `EndConversationTool`.
+  `nl_assertions` (natural-language claims judged by the LLM judge), adopted from upstream as shipped. The
+  rest are action/DB-only. Agent tool surface: 16 tools plus `EndConversationTool`.
 - [tau2_telecom](../domain-guides/tau2-telecom.md) — the 114 IDs in the telecom `base` split and the only
   dual-side domain. The simulated user gets 30 phone-control tools and its own user-side database. The agent
   gets 13 tools plus `EndConversationTool`. All 114 tasks carry `db_state_assertions`, so per-predicate scoring
@@ -120,11 +123,16 @@ variant, which isolates the effect of the two policy phrasings.
 These hand-authored domains require no external fixtures. Use them to verify a pipeline end to end before
 running a ported benchmark.
 
-| Domain | Scenarios | `max_duration` | What It Exercises |
-| --- | --- | --- | --- |
-| `restaurant` | 11 | 180 s (one at 120 s) | Menu-driven ordering with 3 agent tools; adds white noise at -20 dB to the audio |
-| `customer_service` | 10 | 120 s | Ticket lookup and resolution with 4 agent tools |
-| `qa` | 10 | 60 s | Single-question knowledge answers, 2 agent tools, judge-only scoring |
+| Domain | Scenarios | `max_duration` | Summary Tool | What It Exercises |
+| --- | --- | --- | --- | --- |
+| `restaurant` | 11 | 180 s (one at 120 s) | `PlaceOrderTool`, and `JoinWaitListTool` / `DropWaitListTool` in the waitlist scenario | Menu-driven ordering with 3 agent tools; adds white noise at -20 dB to the audio |
+| `customer_service` | 10 | 120 s | `ResolveTicketTool` | Ticket lookup and resolution with 4 agent tools |
+| `qa` | 10 | 60 s | `SaveQuestionAnswerTool` | Single-question knowledge answers, 2 agent tools, judge-only scoring; the two weather scenarios add `GetCityWeatherTool` |
+
+Every tool in the Summary Tool column is a `SendScenarioSummaryTool` subclass, so these domains still use the
+legacy LLM-callable summary path: the agent wraps its structured result in `<final_response>` tags instead of
+the bridge pulling action records. The ported benchmarks use the bridge-pull path and register no summary tool
+at all. Refer to [Authoring Tools](../create-evaluations/authoring-tools.md) for both termination contracts.
 
 Because `qa` and the `simple_qa_*` legacy scenarios gate on `JUDGE_PASSED`, they need a reachable judge.
 `--judge-url` defaults to `http://localhost:8000/v1/chat/completions`, so every run constructs a judge. If

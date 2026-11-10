@@ -44,17 +44,20 @@ The final message list the LLM sees at startup is therefore:
 ## Path or Literal
 
 `system_prompt` is checked with `os.path.isfile()` against the raw string. If it names an existing file, the
-file's full contents become the prompt. Otherwise, the string is used verbatim. The path resolves against the
-**process working directory**, not the config file's directory. Run the server from
-`examples/generic_voice_agent/server/` and use paths relative to that directory, or use an absolute path.
+file's full contents become the prompt. Otherwise, the string is used verbatim.
+
+Prefer an absolute path, which resolves the same way no matter which directory you start the server from:
 
 ```yaml
 llm:
   # literal
   system_prompt: "You are a terse assistant. Answer in one sentence."
   # ...or a file
-  system_prompt: "./example_prompts/fast-bite.txt"
+  system_prompt: "/opt/prompts/fast-bite.txt"
 ```
+
+A relative path resolves against the **process working directory**, not the config file's directory. To load
+`"./example_prompts/fast-bite.txt"`, start the server from `examples/generic_voice_agent/server/`:
 
 ```bash
 cd examples/generic_voice_agent/server
@@ -64,6 +67,11 @@ python server.py
 One practical difference between the two forms: the YAML is loaded with OmegaConf resolution on, so a literal
 prompt containing `${...}` is interpolated as a config reference. A prompt loaded from a text file is read with
 a plain `open()` and never interpolated — prefer the file form for anything long or containing braces.
+
+The `nemo_speechlm` speech-to-text (STT) backend applies the same rule to `stt.system_prompt` and
+`stt.user_prompt`, through the `resolve_prompt` helper in `nemo_voice_agent/utils/misc.py`. The working
+directory caveat above applies there too, and a prompt file moves between the `llm` and `stt` blocks
+unchanged. Refer to [ASR](../../about/core-concepts/speech-pipeline/asr.md#prompt-files).
 
 ## Shipped Example Prompts
 
@@ -92,7 +100,7 @@ What each family puts in the suffix:
 
 | Config | Suffix Content |
 | --- | --- |
-| `nemotron_nano_v3.yaml` (default), `nemotron_nano_v3_think.yaml`, the `_omni` variants, `nemotron_nano_v2.yaml` | The tool-use policy paragraph described below. |
+| `nemotron_3.5_lightning.yaml` (default), `nemotron_3.5_lightning_think.yaml`, `nemotron_nano_v3.yaml`, `nemotron_nano_v3_think.yaml`, the `_omni` variants, `nemotron_nano_v2.yaml` | The tool-use policy paragraph described below. |
 | `qwen3-8B.yaml` / `qwen3-8B_think.yaml` | `/no_think` / `/think`. |
 | `hf_llm_generic.yaml` | `/no_think`. |
 | `qwen2.5-7B.yaml`, `llama3.1-8B-instruct.yaml` | `null`. |
@@ -131,7 +139,8 @@ same constants, so agents stay consistent between the server and eval runs.
 
 If diarization is on, add the speaker-tag handling from `simple_chatbot_diar.txt`. The transcript carries
 `speaker_0`-style tags in angle brackets. The model must use them for attribution without repeating them in
-its reply. Refer to [Diarization](../../about/core-concepts/speech-pipeline/diarization.md).
+its reply. Some user messages can arrive without a tag, so do not instruct the model to expect one on every
+message. Refer to [Diarization](../../about/core-concepts/speech-pipeline/diarization.md).
 
 ## The First Turn
 

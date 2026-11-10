@@ -35,7 +35,7 @@ Before you start a vLLM deployment, complete the following preparation:
 Serving flags live in the model config that `llm.model_config` points at — not in `default.yaml`, and not in
 this page. The sub-YAML **overrides** `default.yaml` for every `llm.*` key it sets, which is why the shipped
 `llm.type: auto` ends up as `vllm`. Read
-`examples/generic_voice_agent/server/server_configs/llm_configs/nemotron_nano_v3.yaml` before copying any
+`examples/generic_voice_agent/server/server_configs/llm_configs/nemotron_3.5_lightning.yaml` before copying any
 command from here. If the two disagree, the YAML wins.
 
 Keys that matter for vLLM:
@@ -45,7 +45,7 @@ Keys that matter for vLLM:
 | `llm.type` | `auto`, `hf`, `vllm`, or `nvidia`. `auto` probes vLLM support for the model and falls back to Hugging Face. |
 | `llm.model` | Sent as the `model` field on every request, so it must match the id vLLM serves. |
 | `llm.base_url` | Where the agent sends completions. Shipped default: `http://localhost:8000/v1`. |
-| `llm.api_key` | vLLM ignores it unless it was started with an API key; the configs ship `"EMPTY"`. |
+| `llm.api_key` | Sent as the bearer token on chat requests. vLLM ignores it unless the server has an API key, in which case it must match that key. The configs ship `"EMPTY"`. |
 | `llm.start_vllm_on_init` | `true` makes the agent spawn `vllm serve` at startup. `false` means you start it. |
 | `llm.vllm_server_params` | A single string of CLI flags appended to `vllm serve <model>`. Only read when spawning. |
 | `llm.vllm_generation_params` | Per-request sampling settings (OpenAI fields plus an `extra` dict). |
@@ -58,7 +58,7 @@ The `start_vllm_on_init` setting determines whether the voice-agent process owns
 
 | `start_vllm_on_init` | Behavior | Ships with |
 | --- | --- | --- |
-| `false` | You run `vllm serve` in a separate terminal. The agent connects to `base_url`. | `nemotron_nano_v3.yaml`, `nemotron_nano_v3_think.yaml`, both `*_omni*.yaml`, and the eval configs under `evaluation/server_configs/` |
+| `false` | You run `vllm serve` in a separate terminal. The agent connects to `base_url`. | `nemotron_3.5_lightning.yaml`, `nemotron_3.5_lightning_think.yaml`, `nemotron_nano_v3.yaml`, `nemotron_nano_v3_think.yaml`, both `*_omni*.yaml`, and the eval configs under `evaluation/server_configs/` |
 | `true` | `VLLMService.__init__` spawns `vllm serve` and blocks until the server reports the model. | `nemotron_nano_v2.yaml`, `qwen3-8B.yaml`, `qwen2.5-7B.yaml`, `llama3.1-8B-instruct.yaml`, `hf_llm_generic.yaml` |
 
 Because the shipped default sets `false`, running `python server.py` by itself does not produce a working
@@ -66,11 +66,11 @@ agent. Start vLLM first.
 
 ## Start vLLM Yourself (Shipped Default)
 
-These flags are the `vllm_server_params` string from `nemotron_nano_v3.yaml`, one flag per line:
+These flags are the `vllm_server_params` string from `nemotron_3.5_lightning.yaml`, one flag per line:
 
 ```bash
 source .venv/bin/activate
-vllm serve nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4 \
+vllm serve nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
     --trust-remote-code \
     --tensor-parallel-size 1 \
     --enable-prefix-caching \
@@ -96,15 +96,29 @@ Notes on individual flags:
 - `--enable-auto-tool-choice --tool-call-parser qwen3_coder` — required for [tool calling](../tools/tool-calling.md).
   Without them the model's tool calls arrive as plain text. Some models need a parser plugin file instead. Refer to
   [vLLM Plugins](vllm-plugins.md).
-- `--reasoning-parser nemotron_v3` — strips reasoning content out of the response server-side. Refer to
+- `--reasoning-parser nemotron_v3` — strips reasoning content out of the response server-side, and supplies the
+  reasoning delimiters that a thinking budget forces once it runs out. Refer to
   [Reasoning Mode](../../about/core-concepts/language-models/reasoning.md).
 - `--gpu-memory-utilization 0.8` leaves headroom on the same GPU for ASR, diarization, and TTS. Lower it if
   those models fail to allocate.
 
-`nemotron_nano_v3_think.yaml` uses the **same** server flags, so one running server serves both configs. The
-differences are all request-side: `enable_thinking: True` under
-`vllm_generation_params.extra.extra_body.chat_template_kwargs`, `max_new_tokens` raised from 1024 to 4096, and a
-new `thinking_budget: 2048` forwarded as `thinking_token_budget`.
+vLLM derives the reasoning delimiters from the parser, so no shipped config sets them. Override both with
+`--reasoning-config` when a checkpoint closes its reasoning span with a non-standard string:
+
+```bash
+vllm serve nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+    --reasoning-parser nemotron_v3 \
+    --reasoning-config '{"reasoning_start_str": "<think>", "reasoning_end_str": "\nI have to finalize the answer now.</think>"}'
+```
+
+The Nemotron-3 model cards do not ask for this flag. Add it only when a manual run leaves reasoning text in the
+spoken response or ignores the thinking budget.
+
+`nemotron_3.5_lightning_think.yaml` (and, for the older model family, `nemotron_nano_v3_think.yaml`) uses the
+**same** server flags, so one running server serves both configs. The differences are all request-side:
+`enable_thinking: True` under `vllm_generation_params.extra.extra_body.chat_template_kwargs`,
+`max_new_tokens` raised from 1024 to 4096, and a new `thinking_budget: 2048` forwarded as
+`thinking_token_budget`.
 
 ## Let the Agent Start vLLM
 
@@ -126,6 +140,12 @@ Two constraints follow from the implementation:
   Use `start_vllm_on_init: false` for a remote server.
 - **No shell quoting.** `vllm_server_params` is split on whitespace, so any flag whose value contains a space
   (such as the omni `--limit-mm-per-prompt` JSON) is mangled. Start those models manually.
+
+A spawned server can require an API key. Set `--api-key <key>` in `vllm_server_params`, or export
+`VLLM_API_KEY`, which the child process inherits. The `/v1/models` probes send that key as a bearer token. The
+probes resolve the key from `--api-key` first, then `VLLM_API_KEY`, then `llm.api_key`, which covers a server
+that is already running on the port. Chat requests always use `llm.api_key`, so set it to the same key. If an
+already-running server rejects the key with 401, the agent logs a warning that names these three settings.
 
 `llm.device` does **not** reach the spawned vLLM process: `get_llm_service_from_config` passes `device` only on
 the `hf` path, so `VLLMService` always uses its built-in `cuda` default and never sets `CUDA_VISIBLE_DEVICES`.
@@ -154,7 +174,11 @@ accepts connections from outside its machine. For a hosted endpoint rather than 
 The shipped default is NVFP4 and fits one GPU with FP4 support at `--tensor-parallel-size 1`. For rough sizing,
 allow about 21 GB for a 9B LLM and 13 GB for a 4B LLM. Also reserve a few GB for speech models that share the
 GPU. `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` needs more than 60 GB, so raise
-`--tensor-parallel-size` to 2 (and set `--max-model-len 8192` to keep the KV cache in budget).
+`--tensor-parallel-size` to 2 (and set `--max-model-len 8192` to keep the KV cache in budget). On a GPU that
+supports FP8 but not FP4, serve
+[`nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8`](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8)
+instead of the BF16 weights: point `llm.model` at that repository, keep the rest of the config as shipped, and the
+VRAM requirement drops well below the BF16 figure.
 
 Tuning order when you hit an out-of-memory error:
 
@@ -186,8 +210,10 @@ vllm serve nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4 \
 ```
 
 Keep `start_vllm_on_init: false` here: the quoted JSON values would not survive the whitespace split
-described above. Set `keep_only_last_audio_turn: false` against a self-hosted vLLM, which accepts multiple
-audio turns. For the remaining omni keys, refer to
+described above. Because you type this command yourself, you can also add `--kv-cache-dtype fp8`, which the
+[model card](https://huggingface.co/nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16) lists for the quantized
+checkpoints to shrink the KV cache. Omit that flag for the BF16 checkpoint. Set `keep_only_last_audio_turn: false`
+against a self-hosted vLLM, which accepts multiple audio turns. For the remaining omni keys, refer to
 [Multimodal / Omni](../../about/core-concepts/language-models/multimodal.md).
 
 ## Related Pages

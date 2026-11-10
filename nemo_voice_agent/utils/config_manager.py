@@ -22,6 +22,7 @@ from pipecat.audio.vad.silero import VADParams
 
 from nemo_voice_agent.pipecat.services.nemo.diar import NeMoDiarInputParams
 from nemo_voice_agent.pipecat.services.nemo.stt import NeMoSTTInputParams
+from nemo_voice_agent.utils.misc import redact_secrets, redact_value, resolve_prompt
 
 
 class ConfigManager:
@@ -161,12 +162,13 @@ class ConfigManager:
             for key in stt_config:
                 if key in self.server_config.stt and self.server_config.stt[key] != stt_config[key]:
                     logger.info(
-                        f"STT config field `{key}` is overridden from `{self.server_config.stt[key]}` "
-                        f"to `{stt_config[key]}` by {stt_config_path}"
+                        f"STT config field `{key}` is overridden from "
+                        f"`{redact_value(key, self.server_config.stt[key])}` "
+                        f"to `{redact_value(key, stt_config[key])}` by {stt_config_path}"
                     )
                 self.server_config.stt[key] = stt_config[key]
 
-        logger.info(f"Final STT config: {self.server_config.stt}")
+        logger.info(f"Final STT config: {redact_secrets(self.server_config.stt)}")
 
         audio_chunk_size_in_secs = self.server_config.stt.get("audio_chunk_size_in_secs", 0.08)
         buffer_size = audio_chunk_size_in_secs // self.RAW_AUDIO_FRAME_LEN_IN_SECS
@@ -185,10 +187,57 @@ class ConfigManager:
         self.USE_DIAR = self.server_config.diar.enabled
         if self.USE_DIAR:
             self.DIAR_MODEL = self.server_config.diar.model
+            self._merge_diar_model_config()
             self.diar_params = NeMoDiarInputParams(
                 frame_len_in_secs=self.server_config.diar.frame_len_in_secs,
                 threshold=self.server_config.diar.threshold,
+                spkcache_len=self.server_config.diar.get("spkcache_len", None),
+                fifo_len=self.server_config.diar.get("fifo_len", None),
+                spkcache_update_period=self.server_config.diar.get("spkcache_update_period", None),
+                chunk_len=self.server_config.diar.get("chunk_len", None),
+                chunk_right_context=self.server_config.diar.get("chunk_right_context", None),
             )
+
+    def _merge_diar_model_config(self):
+        """Merge the model's ``diar_configs/`` YAML (its streaming settings) into the ``diar`` block.
+
+        The file comes from ``diar.model_config`` or, failing that, the ``diar_models`` section of the model
+        registry. As for the other components, keys in the model YAML override the top-level config.
+        """
+        yaml_file_name = None
+        if self.server_config.diar.get("model_config", None) is not None:
+            yaml_file_name = os.path.basename(self.server_config.diar.model_config)
+        elif self.use_model_registry:
+            diar_models = self.model_registry.get("diar_models", None) or {}
+            model_name = str(self.DIAR_MODEL)
+            if model_name.endswith(".nemo"):
+                # A local checkpoint matches the registry entry whose repository name it carries.
+                model_name = os.path.splitext(os.path.basename(model_name))[0]
+            for registry_name, entry in diar_models.items():
+                if model_name in (registry_name, registry_name.split("/")[-1]):
+                    yaml_file_name = entry.yaml_id
+                    break
+            else:
+                logger.warning(
+                    f"Diarization model {model_name} is not in the model registry ({list(diar_models)}); using the "
+                    "streaming settings in the diar block of the server config."
+                )
+
+        if yaml_file_name is None:
+            return
+        diar_config_path = f"{os.path.abspath(self._server_base_path)}/server_configs/diar_configs/{yaml_file_name}"
+        if not os.path.exists(diar_config_path):
+            raise FileNotFoundError(f"Diarization config file not found at {diar_config_path}")
+        diar_config = OmegaConf.load(diar_config_path)
+        for key in diar_config:
+            if key in self.server_config.diar and self.server_config.diar[key] != diar_config[key]:
+                logger.info(
+                    f"Diarization config field `{key}` is overridden from "
+                    f"`{redact_value(key, self.server_config.diar[key])}` "
+                    f"to `{redact_value(key, diar_config[key])}` by {diar_config_path}"
+                )
+            self.server_config.diar[key] = diar_config[key]
+        logger.info(f"Final diarization config: {redact_secrets(self.server_config.diar)}")
 
     def _resolve_backchannel_phrases(self, backchannel_phrases):
         """Resolve ``turn_taking.backchannel_phrases_path`` to something usable.
@@ -235,12 +284,38 @@ class ConfigManager:
 
     def _configure_turn_taking(self):
         """Configure turn taking parameters."""
-        if self.server_config.turn_taking.get("enabled", True):
-            self.TURN_TAKING_BACKCHANNEL_PHRASES_PATH = self._resolve_backchannel_phrases(
-                self.server_config.turn_taking.backchannel_phrases_path
+        turn_taking = self.server_config.turn_taking
+        if "enabled" in turn_taking:
+            logger.warning(
+                "turn_taking.enabled is ignored, it was replaced by turn_taking.type: use `type: nemo` in "
+                "place of `enabled: true`, and `type: speech_timeout` in place of `enabled: false`."
             )
-            self.TURN_TAKING_MAX_BUFFER_SIZE = self.server_config.turn_taking.max_buffer_size
-            self.TURN_TAKING_BOT_STOP_DELAY = self.server_config.turn_taking.bot_stop_delay
+
+        self.TURN_TAKING_TYPE = turn_taking.get("type", "nemo")
+        available_types = ["nemo", "speech_timeout"]
+        assert self.TURN_TAKING_TYPE in available_types, (
+            f"Invalid turn taking type: {self.TURN_TAKING_TYPE}, only {available_types} are supported"
+        )
+
+        self.TURN_TAKING_USER_SPEECH_TIMEOUT = turn_taking.get("user_speech_timeout", 0.6)
+
+        # Pipecat's watchdog force-ends a user turn after this many seconds without speech or transcripts.
+        # Off by default (null or 0): an STT reply slower than the timeout landed in the next user turn. 0 is
+        # mapped to None because pipecat would busy-loop on it.
+        user_turn_stop_timeout = turn_taking.get("user_turn_stop_timeout", None)
+        assert user_turn_stop_timeout is None or (
+            isinstance(user_turn_stop_timeout, (int, float))
+            and not isinstance(user_turn_stop_timeout, bool)
+            and user_turn_stop_timeout >= 0
+        ), f"turn_taking.user_turn_stop_timeout must be null or a number >= 0, got {user_turn_stop_timeout!r}"
+        self.TURN_TAKING_USER_TURN_STOP_TIMEOUT = float(user_turn_stop_timeout) if user_turn_stop_timeout else None
+
+        if self.TURN_TAKING_TYPE == "nemo":
+            self.TURN_TAKING_BACKCHANNEL_PHRASES_PATH = self._resolve_backchannel_phrases(
+                turn_taking.backchannel_phrases_path
+            )
+            self.TURN_TAKING_MAX_BUFFER_SIZE = turn_taking.max_buffer_size
+            self.TURN_TAKING_BOT_STOP_DELAY = turn_taking.bot_stop_delay
         else:
             self.TURN_TAKING_BACKCHANNEL_PHRASES_PATH = ""
             self.TURN_TAKING_MAX_BUFFER_SIZE = 0
@@ -287,21 +362,18 @@ class ConfigManager:
             for key in llm_config:
                 if key in self.server_config.llm and self.server_config.llm[key] != llm_config[key]:
                     logger.info(
-                        f"LLM config field `{key}` is overridden from `{self.server_config.llm[key]}` to "
-                        f"`{llm_config[key]}` by {llm_config_path}"
+                        f"LLM config field `{key}` is overridden from "
+                        f"`{redact_value(key, self.server_config.llm[key])}` to "
+                        f"`{redact_value(key, llm_config[key])}` by {llm_config_path}"
                     )
                 self.server_config.llm[key] = llm_config[key]
 
-        logger.info(f"Final LLM config: {self.server_config.llm}")
+        logger.info(f"Final LLM config: {redact_secrets(self.server_config.llm)}")
 
         # Configure system prompt
         self.SYSTEM_ROLE = self.server_config.llm.get("system_role", "system")
         if self.server_config.llm.get("system_prompt", None) is not None:
-            system_prompt = self.server_config.llm.system_prompt
-            if os.path.isfile(system_prompt):
-                with open(system_prompt, "r") as f:
-                    system_prompt = f.read()
-            self.SYSTEM_PROMPT = system_prompt
+            self.SYSTEM_PROMPT = resolve_prompt(self.server_config.llm.system_prompt)
         else:
             logger.info(f"No system prompt provided, using default system prompt: {self.SYSTEM_PROMPT}")
 
@@ -342,12 +414,13 @@ class ConfigManager:
             for key in tts_config:
                 if key in self.server_config.tts and self.server_config.tts[key] != tts_config[key]:
                     logger.info(
-                        f"TTS config field `{key}` is overridden from `{self.server_config.tts[key]}` to "
-                        f"`{tts_config[key]}` by {tts_config_path}"
+                        f"TTS config field `{key}` is overridden from "
+                        f"`{redact_value(key, self.server_config.tts[key])}` to "
+                        f"`{redact_value(key, tts_config[key])}` by {tts_config_path}"
                     )
                 self.server_config.tts[key] = tts_config[key]
 
-        logger.info(f"Final TTS config: {self.server_config.tts}")
+        logger.info(f"Final TTS config: {redact_secrets(self.server_config.tts)}")
 
         # Extract TTS parameters
         self.TTS_MAIN_MODEL_ID = self.server_config.tts.get("main_model_id", None)

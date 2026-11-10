@@ -29,7 +29,7 @@ The development environment has the following requirements:
 | --- | --- |
 | Python 3.12 or 3.13 | `requires-python = ">=3.12,<3.14"` in `pyproject.toml` |
 | [uv](https://github.com/astral-sh/uv) | Manages the virtual environment, lockfile, and its own managed Python (`python-preference = "only-managed"`). |
-| Git | Sign-off is required on every commit, as described in the sign-off section. |
+| Git | Sign-off is required on every commit, as described in the sign-off section. `uv sync` also uses Git to fetch the pinned NeMo Speech commit. |
 | Linux and `apt` | `install.sh` uses `apt-get`. Install the required operating system packages manually on other platforms. |
 
 Clone and bootstrap:
@@ -61,6 +61,18 @@ with `source .venv/bin/activate`. Review these constraints:
 - **The default install pulls CUDA 13.0 wheels** (`torch-backend = "cu130"` under `[tool.uv]`). Edit that key
   in `pyproject.toml` before syncing if you need `cu128`, `cu124`, or CPU-only. Refer to
   [Installation](../../get-started/installation.md).
+- **NeMo comes from a Git commit, not PyPI.** `pyproject.toml` pins `nemo-toolkit[asr,tts]` to a commit of
+  the NeMo Speech repository, because no PyPI release loads `nvidia/Nemotron-3-Diarization`, the default
+  diarization model, yet. To move the pin, change the commit hash in `pyproject.toml` and regenerate `uv.lock`
+  with `uv lock`. Keep the `torch==2.11.0` entry in `override-dependencies`, which stops the NeMo Speech
+  dependency from resolving `torch` to a CPU-only wheel. Keep the `nltk>=3.10.0` entry too, which stops it
+  from installing `nltk` from a release-candidate Git tag that lacks the 3.10.0 security fixes. Keep the direct
+  `peft` dependency as well, because the NeMo text-to-speech package imports it. After you pull a change to the
+  pin, run `bash install.sh` or `uv sync` again to update an existing `.venv`.
+- **The `torch` override and the `vllm` cap move together.** The `torch==2.11.0` override hides vLLM's exact
+  `torch` pin from the resolver, so `pyproject.toml` caps `vllm` below 0.27, the first release built against
+  a newer `torch`. To upgrade vLLM, raise the cap and change the override to the `torch` version that the new
+  vLLM release pins, in the same change.
 
 ## Code Style
 
@@ -173,6 +185,16 @@ To prepare and submit a pull request, complete the following steps:
 5. Push to your fork and open a pull request against `main` that describes what changed and why.
 6. Address review feedback, and squash the history before merge.
 
+### Requesting Review
+
+Comment `/review` on your pull request to request an automated review. Use `/review mode=strict` for a
+strict review.
+
+The `claude-review.yml` workflow only posts command guidance for repository owners, members, and
+collaborators. Exact `/claude review` and `/claude strict-review` comments receive guidance to use
+`/review` and `/review mode=strict`, respectively. Bot comments do not trigger the workflow, and the
+workflow does not run Claude Code.
+
 ### Triggering CI
 
 The pipeline runs on pushes to `main`, to `deploy-release/*`, and to the bot-mirrored
@@ -185,10 +207,12 @@ automatically on each push. Otherwise, comment on the pull request with the SHA 
 
 Repeat the comment for each new commit. Get the SHA from `git log --oneline -1`.
 
-Documentation-only pull requests take a different path: `fern-docs-ci.yml` and
-`fern-docs-preview-build.yml` have a `docs/**` path filter and gate on MDX safety, `fern check`, and offline
-link checking. Refer to
-[Building the Docs](docs-site.md) before editing anything under `docs/`.
+Documentation-only pull requests take a different path. `fern-docs-ci.yml` checks MDX safety, navigation,
+Fern configuration, and offline links when a pull request changes `docs/**`. Separately,
+`fern-docs-preview.yml` runs on pushes to bot-mirrored `pull-request/<number>` branches. It builds a hosted
+preview and posts its link when `PUBLISH_FERN=true` and the pull request changes `docs/**` or
+`.github/workflows/fern-docs-ci.yml`. Refer to [Building the Docs](docs-site.md) before editing anything
+under `docs/`.
 
 ## Where Changes Usually Go
 

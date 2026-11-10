@@ -68,8 +68,8 @@ behind and produces a shorter pipeline.
 | VAD | `VADProcessor` wrapping a Silero analyzer. Emits `VADUserStartedSpeakingFrame` and `VADUserStoppedSpeakingFrame`. Pipecat 1.x removed VAD from the input transport, so it runs here as its own processor. |
 | RTVI | `RTVIProcessor`. Handles the client control protocol — client-ready handshake, client messages, and server responses. |
 | STT | Streaming NeMo ASR. Pushes transcription frames **and** passes the raw audio through (`audio_passthrough=True`), so downstream stages still see audio. |
-| Diar | Streaming speaker diarization. Pushes a `DiarResultFrame` whenever the dominant speaker changes. |
-| TurnTaking | `NeMoTurnTakingService`. Decides when the user's turn has ended, filters backchannels, and prefixes transcripts with `<speaker_N>` tags when diarization is on. |
+| Diar | Streaming speaker diarization. Pushes one `DiarResultFrame` for each 80 ms frame of audio in which it hears a speaker, tagged with the VAD segment that the audio came from. The shipped `nvidia/Nemotron-3-Diarization` model streams in chunks, so it pushes these frames in bursts, one burst per chunk. |
+| TurnTaking | `NeMoTurnTakingService`. Decides when the user's turn has ended, filters backchannels, and, when diarization is on, prefixes each transcript with a `<speaker_N>` tag chosen from that utterance's `DiarResultFrame` votes. |
 | UserAudioBuffer | Buffers the user's raw audio and attaches it to the large language model (LLM) context for audio-input (omni) models. |
 | UserAggregator | Turns finalized user speech into a user message on the shared `LLMContext`, then triggers the LLM. |
 | LLM | Hugging Face, vLLM, or hosted NVIDIA endpoint, selected by `llm.type`. Streams text back token by token. |
@@ -86,15 +86,21 @@ The following table shows when each conditional stage is present and why it can 
 | --- | --- | --- |
 | VAD | always | `build_vad_analyzer` always returns a `SileroVADAnalyzer`, so `build_vad_processor` never returns `None` on this path. VAD is not an opt-out. |
 | Diar | `diar.enabled: true` | `true` in the shipped `default.yaml`. Requires GPU. |
-| TurnTaking | `turn_taking.enabled` is not `false` | Defaults to on when the key is absent. The `*_nvidia.yaml` configurations set it to `false` and let VAD alone drive turn boundaries. |
-| UserAudioBuffer | `llm.is_omni_model: true` | Only the `nemotron_nano_v3_omni*` LLM configurations set this. |
+| TurnTaking | `turn_taking.type: nemo` | The default when the key is absent. The `*_nvidia.yaml` and `default_salm.yaml` configurations set `type: speech_timeout`, which drops the stage and lets Pipecat's VAD strategies drive turn boundaries. |
+| UserAudioBuffer | `llm.is_omni_model: true` | Set by the `nemotron_nano_v3_omni*` LLM configurations and by `evaluation/server_configs/agent_nvidia_omni.yaml`. |
 | LLMTextProcessor | `tts.use_text_aggregator` is not `false` | Defaults to on. With it off, TTS falls back to plain sentence splitting. |
 
 Turn detection has exactly one owner. `build_context_and_aggregators` inspects whether a turn-taking
 service exists: when it does, the user aggregator is configured with `ExternalUserTurnStrategies` so
 it stays quiet and lets `NeMoTurnTakingService` emit the user-turn frames. When no service exists, the
-aggregator emits those frames directly from the VAD frames. Only one component emits
-`UserStartedSpeakingFrame`, so there is no double emission either way.
+aggregator emits those frames from the VAD frames through a `SpeechTimeoutUserTurnStopStrategy`, which
+waits `turn_taking.user_speech_timeout` on top of `vad.stop_secs`. With `stt.type: nemo_speechlm` and a
+non-omni LLM, the builder uses the `SegmentedSTTUserTurnStopStrategy` subclass from
+`nemo_voice_agent/pipecat/turns/`, which also waits until every VAD segment in the turn is transcribed. Only
+one component emits `UserStartedSpeakingFrame`, so there is no double emission either way. On both paths,
+Pipecat's user-turn watchdog stays off unless `turn_taking.user_turn_stop_timeout` sets it, so a user turn ends
+only when its stop strategy fires. For the latency arithmetic and the watchdog, refer to
+[Turn taking](core-concepts/speech-pipeline/turn-taking.md).
 
 ## Configuration Flow
 
@@ -103,9 +109,9 @@ aggregator emits those frames directly from the VAD frames. Only one component e
 `model_config:` field. This order has two important consequences:
 
 - **The model sub-YAML overrides the top-level configuration.** `default.yaml` sets
-  `llm.type: auto`, but `llm_configs/nemotron_nano_v3.yaml` sets `type: vllm`, so the effective value
+  `llm.type: auto`, but `llm_configs/nemotron_3.5_lightning.yaml` sets `type: vllm`, so the effective value
   is `vllm`. A key in `default.yaml` has no effect when the sub-YAML also defines it.
-- The shipped default LLM, `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4`, sets
+- The shipped default LLM, `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4`, sets
   `start_vllm_on_init: false` — the server does **not** launch vLLM for you. Start it in a separate
   terminal first, as shown in the [Quickstart](../get-started/quickstart.md).
 

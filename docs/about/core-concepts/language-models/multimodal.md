@@ -39,6 +39,14 @@ Neither file is listed in `server/model_registry.yaml`, so point `llm.model_conf
 occurs only for models resolved through the registry, as implemented in
 `nemo_voice_agent/utils/config_manager.py`.
 
+Both configurations name the NVFP4 checkpoint, which targets a GPU with FP4 support. The same model also
+ships as [`nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16`](https://huggingface.co/nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16)
+and [`nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-FP8`](https://huggingface.co/nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-FP8).
+The three checkpoints differ only in quantization and use the same serving recipe, so to switch, replace the
+model name in `llm.model` and in the `vllm serve` command. Higher-precision checkpoints need more VRAM.
+Refer to the [model card](https://huggingface.co/nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16#vllm) for
+upstream vLLM deployment notes.
+
 ## Enable an Omni Model
 
 To send raw user audio to the LLM with the shipped Omni configuration, complete the following steps.
@@ -90,8 +98,8 @@ Refer to [Reasoning Mode](reasoning.md) for the thinking variant.
 
 When `llm.is_omni_model` is true, `server.py` constructs a `UserAudioBuffer`
 (`nemo_voice_agent/pipecat/services/common.py`) and inserts it into the pipeline **after** the STT,
-diarization, and turn-taking stages and **before** the user context aggregator. Nothing else in the
-pipeline changes: VAD, ASR, diarization, and turn-taking all still run.
+diarization, and turn-taking stages and **before** the user context aggregator. The switch also changes
+the user aggregator's stop strategy, as described below. VAD, ASR, diarization, and turn-taking all still run.
 
 The buffer works per user turn:
 
@@ -107,6 +115,22 @@ enabled, user turns in the LLM context therefore hold audio rather than ASR text
 turn taking upstream of the buffer and drives barge-in and backchannel handling. For details, refer to
 [Turn Taking](../speech-pipeline/turn-taking.md).
 
+Because no transcript reaches the user aggregator, `build_context_and_aggregators` builds the user-turn stop
+strategy with `wait_for_transcript=False` under both turn-taking types. A turn therefore ends on the
+end-of-speech signal alone:
+
+- Under `type: speech_timeout`, the turn ends `vad.stop_secs` plus `turn_taking.user_speech_timeout` after the
+  user stops speaking, or later when the transcript safety-net timer is longer. The buffer then adds the
+  audio message and runs the LLM. With `evaluation/server_configs/agent_nvidia_omni.yaml`, that is 1.0 second.
+- Under `type: nemo`, the `UserStoppedSpeakingFrame` from `NeMoTurnTakingService` ends the turn and triggers
+  the buffer.
+
+A transcript that arrives after the turn ends stays in the buffer for the next turn. With
+`use_stt_transcript: true`, the next turn's audio message carries it. Every shipped omni configuration sets
+that key to `false`. The `keep_only_last_audio_turn` stand-in text reads the same buffer, so a late transcript
+also moves into the next turn's stand-in. For the timing details, refer to
+[User-Turn Watchdog](../speech-pipeline/turn-taking.md#user-turn-watchdog).
+
 The buffer is registered in the server's `resettable` list, so the RTVI `reset` action clears any partially
 buffered audio and transcript along with the conversation context.
 
@@ -120,7 +144,7 @@ The following keys live under `llm:`. `server.py` reads them only when `is_omni_
 | `pre_cache_duration_secs` | `0.3` | `0.3` | Seconds of pre-speech audio kept in the ring buffer |
 | `use_stt_transcript` | `false` | `false` | Also append the ASR transcript to the audio message |
 | `text_prompt_for_audio` | `null` | `"Follow instructions or answer questions in the audio."` | Text that accompanies every audio turn |
-| `text_prompt_for_transcript` | `null` | `"Here is the pseudo-transcript of the audio for reference:"` | Preamble before the transcript that is used only when `use_stt_transcript` is true |
+| `text_prompt_for_transcript` | `null` | `"Here is the pseudo-transcript of the audio for reference:"` | Preamble before the transcript in the audio message when `use_stt_transcript` is true, and always in the `keep_only_last_audio_turn` stand-in |
 | `keep_only_last_audio_turn` | `false` | `false` | Keep at most one audio turn in the context |
 
 Notes on the individual keys:

@@ -55,6 +55,14 @@ eval_results/eval_YYYYMMDD_HHMMSS/
         └── user_tools.json
 ```
 
+`scenario_config/` is a self-sufficient snapshot, so an old run stays interpretable without reloading
+the scenario class. Alongside the verbatim prompts and tool schemas handed to each bot,
+`metadata.json` records the scenario identity (`name`, `domain`, `description`), its `max_duration`
+and `noise_config`, the action-matching flags (`ignore_capitalization`, `ignore_punctuation`,
+`clean_text`, `disallow_extra_items`), and the `success_signals` whitelist. Scoring fields are added
+only when the scenario defines them: `expected_db_hash` and `expected_user_db_hash`,
+`db_state_assertions`, `nl_assertions`, and `initialization_actions`.
+
 ## Which File Answers Which Question
 
 Start with the artifact that most directly answers your investigation question.
@@ -81,7 +89,7 @@ rates, token usage, and per-domain breakdowns when the run spans multiple domain
 
 Two lines deserve special attention:
 
-- `WARNING: N scenario(s) had fewer than 3 agent turn(s) ... and were counted as failures.` — the
+- `WARNING: N scenario(s) had fewer than 2 agent turn(s) ... and were counted as failures.` — the
   `--min-agent-turns` filter fired. Those scenarios are hard failures in the composite rate and are
   skipped in the per-signal rates, so they depress the headline number while shrinking every
   per-signal denominator. Re-run them with `--resume` as described in [Resuming a Run](resume.md).
@@ -105,8 +113,12 @@ The per-scenario source of truth. Fields always present:
 | `duration_seconds`, `scenario_duration` | Bridge-measured and runner-measured wall clock |
 | `latency_stats` | `count`, `mean_ms`, `p50_ms`, `p95_ms`, `min_ms`, `max_ms` |
 | `latencies` | Per-measurement `user_transcript` / `agent_transcript` / `latency_ms` |
-| `stop_reason` | `[EXIT]` (agent ended the call) or `[TIMEOUT]` |
-| `clean_exit` | `true` only if `stop_reason` is `[EXIT]` |
+| `stop_reason` | `[EXIT]` (agent ended the call), `[SIMULATOR_EXIT]` (simulator ended it under the opt-in policy), `[INACTIVITY_TIMEOUT]` (the activity timer expired), or `[TIMEOUT]` (the overall scenario limit expired) |
+| `inactivity_timeout_seconds` | Configured inactivity interval; `120.0` seconds by default |
+| `clean_exit` | Conversation-end verdict under the selected policy |
+| `end_conversation_tool_called` | Whether the agent explicitly called `EndConversationTool` |
+| `simulator_end_reported`, `last_speaker` | Whether the simulator reported success and the role of the final recorded turn |
+| `conversation_end_policy`, `conversation_end_reason` | Policy used and diagnostic reason for its verdict |
 | `is_action_match` | Action-list signal; `"N/A"` when the scenario ships no reference answer |
 | `token_usage` | Per side: `n_calls`, `prompt`, `completion` |
 | `success_breakdown` | Signal names bucketed into `passed` / `failed` / `not_applicable` / `excluded` |
@@ -175,6 +187,17 @@ read both files: the user-sim's phone-tool calls exist only on the user side.
 `bridge_log.txt` covers audio routing, real-time voice interface (RTVI) events, scenario initialization, cross-side sync
 dispatches, and the end-of-scenario summary pull. Start here when a scenario produced no
 `metrics.json` at all — the bridge log records the connection or initialization failure.
+
+It is written at `DEBUG` level, so two greps confirm the handshake quickly:
+
+- `update_system_prompt` — the bot's `server-response` acknowledging the per-scenario prompt and tool
+  registration, one line per side. Seeing it is the positive confirmation that your bot received the
+  scenario's prompt; its absence means the prompt never landed, which usually shows up as a generic
+  agent that ignores the domain policy.
+- `[AGENT METRICS] ttfb` (and `[USER METRICS] ttfb`) — per-processor time-to-first-byte events, for
+  example `processor=NvidiaLLMService#0 value=0.819s`. Use them to confirm your LLM service is
+  emitting TTFB at all; they are informational, and the scored response latency comes from
+  `metrics.json` instead.
 
 ## Triage Recipes
 

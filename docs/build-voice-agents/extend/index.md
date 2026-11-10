@@ -53,8 +53,8 @@ ws.input -> VAD -> RTVI -> STT -> [Diar] -> [TurnTaking] -> [UserAudioBuffer]
 ```
 
 Bracketed stages are dropped when their builder returns `None`. These stages include `Diar` when
-`diar.enabled` is false and `TurnTaking` when turn taking is disabled. They also include `LLMTextProcessor`
-when `tts.use_text_aggregator` is false and `UserAudioBuffer` for non-omni models
+`diar.enabled` is false and `TurnTaking` when `turn_taking.type` is `speech_timeout`. They also include
+`LLMTextProcessor` when `tts.use_text_aggregator` is false and `UserAudioBuffer` for non-omni models
 (`llm.is_omni_model`). Refer to
 [How It Works](../../about/architecture.md) for the runtime view.
 
@@ -72,9 +72,9 @@ environment variable. It gives each section to the matching builder: `stt:` to `
 The two config directories use different structures:
 
 - **Demo configs** (`default.yaml`, `default_nvidia.yaml`) delegate per-model parameters to a sub-YAML through
-  `model_config:`. The field points into `llm_configs/`, `tts_configs/`, or `stt_configs/`. The sub-YAML
-  **overrides** the top-level file, so its value wins when both files set the same key. Editing that key in
-  `default.yaml` alone has no effect.
+  `model_config:`. The field points into `llm_configs/`, `tts_configs/`, `stt_configs/`, or `diar_configs/`.
+  The sub-YAML **overrides** the top-level file, so its value wins when both files set the same key. Editing
+  that key in `default.yaml` alone has no effect.
 - **Eval configs** (`agent.yaml`, `agent_nvidia.yaml`, `agent_nvidia_omni.yaml`, `user.yaml`,
   `user_nvidia.yaml`) are flat and self-contained. They have no `model_config:` key or sub-config directories
   under `evaluation/server_configs/`. Sub-config paths resolve against the entrypoint's directory, so a
@@ -98,8 +98,12 @@ What Tier 1 covers without any Python:
 | Swap TTS voice or engine | `tts.model`, `tts.main_model_id`, `tts.sub_model_id` |
 | Swap the streaming ASR model | `stt.model`, `stt.att_context_size` |
 | Toggle diarization | `diar.enabled` |
-| Backchannel handling | `turn_taking.backchannel_phrases_path` |
+| Swap the diarization model, for example to the four-speaker `nvidia/diar_streaming_sortformer_4spk-v2.1` | `diar.model`; its streaming settings come from `diar_configs/` |
+| Turn-taking strategy (`nemo` or `speech_timeout`) | `turn_taking.type` |
+| Backchannel handling (`nemo` only) | `turn_taking.backchannel_phrases_path` |
 | VAD sensitivity and endpointing | `vad.confidence`, `vad.stop_secs` |
+| End-of-turn wait added after VAD stop (`speech_timeout` only) | `turn_taking.user_speech_timeout` |
+| Watchdog that ends a stalled user turn (off by default) | `turn_taking.user_turn_stop_timeout` |
 | Tool calling | `llm.enable_tool_calling` |
 
 Run a demo server against your edited config:

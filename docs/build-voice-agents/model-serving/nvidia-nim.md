@@ -20,7 +20,9 @@ limitations under the License.
 NeMo Labs Voice Agent can run automatic speech recognition (ASR), the large language model (LLM), and
 text-to-speech (TTS) against hosted NVIDIA endpoints instead of local GPU models. This configuration-only
 change sets `stt.type`, `llm.type`, and `tts.type` to `nvidia`. The builders in
-`nemo_voice_agent/pipecat/services/nemo/` construct Pipecat's NVIDIA services from the same YAML blocks.
+`nemo_voice_agent/pipecat/services/nemo/` construct Pipecat's
+[NVIDIA services](https://github.com/pipecat-ai/pipecat/tree/main/src/pipecat/services/nvidia) from the same
+YAML blocks.
 
 ## Prerequisites
 
@@ -33,8 +35,8 @@ Before you connect the agent to hosted NVIDIA endpoints, complete the following 
 ## Run It
 
 `server_configs/default_nvidia.yaml` is the ready-made top-level config. All three component types are
-`nvidia`, and both `diar.enabled` and `turn_taking.enabled` are `false`. There is no diarization NIM, so voice
-activity detection (VAD) alone drives turn boundaries.
+`nvidia`, `diar.enabled` is `false`, and `turn_taking.type` is `speech_timeout`. There is no diarization NIM,
+so voice activity detection (VAD) alone drives turn boundaries.
 
 ```bash
 export NVIDIA_API_KEY="nvapi-..."
@@ -45,6 +47,25 @@ SERVER_CONFIG_PATH=./server_configs/default_nvidia.yaml python server.py
 `SERVER_CONFIG_PATH` is resolved against the current working directory, so `cd` first. The browser
 client is unchanged. Refer to [Quickstart](../../get-started/quickstart.md). Unlike the default vLLM path,
 this config has no local model server to start in a second terminal.
+
+That turn-taking type hands end-of-turn detection to Pipecat's `SpeechTimeoutUserTurnStopStrategy`, which
+the builder constructs with `turn_taking.user_speech_timeout`:
+
+```yaml
+turn_taking:
+  type: speech_timeout      # "nemo" runs NeMoTurnTakingService instead
+  user_speech_timeout: 0.6  # wait after VAD stop, on top of vad.stop_secs
+```
+
+The strategy waits `user_speech_timeout` seconds after the VAD reports end of speech, so this wait adds to
+`vad.stop_secs` rather than replacing it. A second timer runs alongside it as a safety net for slow
+transcripts, lasting `max(0, stt.ttfs_p99_latency - vad.stop_secs)`, which is 0.8 seconds here because the
+config leaves `ttfs_p99_latency` unset and Pipecat substitutes 1.0. With the shipped `vad.stop_secs: 0.2`,
+the end-of-turn delay is therefore 0.8 seconds when the final transcript lands promptly and 1.0 seconds when
+it does not. Lower `user_speech_timeout` to shorten the floor, or raise it to give the user more room to
+resume speaking after a pause. The `nemo`-only keys (`backchannel_phrases_path`, `max_buffer_size`, and
+`bot_stop_delay`) are ignored on this path. Refer to
+[Turn Taking](../../about/core-concepts/speech-pipeline/turn-taking.md).
 
 The two-bot eval harness has matching configs (`evaluation/server_configs/agent_nvidia.yaml`,
 `user_nvidia.yaml`, `agent_nvidia_omni.yaml`). Refer to
@@ -89,7 +110,7 @@ Pipecat's `NvidiaLLMService` (an OpenAI-compatible client).
 | Key | Value in `default_nvidia.yaml` | Notes |
 | --- | --- | --- |
 | `type` | `nvidia` | One of `auto`, `hf`, `vllm`, `nvidia`. |
-| `model` | `nvidia/nemotron-3-nano-30b-a3b` | Hosted model id, not a local checkpoint path. |
+| `model` | `nvidia/nemotron-3.5-lightning-30b-a3b` | Hosted model id, not a local checkpoint path. |
 | `base_url` | `https://integrate.api.nvidia.com/v1` | Also selects which API-key variable is required, as described above. |
 | `default_headers` | unset | Optional dict of extra HTTP headers. |
 | `nvidia_generation_params` | inline block | Cast into Pipecat's OpenAI settings object. Holds `temperature`, `top_p`, `max_completion_tokens`, `frequency_penalty`, `presence_penalty`, `seed`, and an `extra` dict for model-specific fields. |
@@ -187,3 +208,16 @@ Continue with the concept or configuration reference that matches the backend yo
 - [ASR](../../about/core-concepts/speech-pipeline/asr.md) and [TTS](../../about/core-concepts/speech-pipeline/tts.md) — the local counterparts of these blocks.
 - [Server Configuration](../configure/server-config.md) — every top-level block.
 - [Troubleshooting](../../troubleshooting/index.md).
+
+For the hosted services themselves, browse the [NIM catalog](https://developer.nvidia.com/nim) and then the
+documentation for the service behind each block:
+
+- [NVIDIA NIM LLM Service](https://docs.nvidia.com/nim/large-language-models/latest/introduction.html) — the
+  models reached through `llm.base_url`.
+- [NVIDIA Riva ASR NIM Service](https://docs.nvidia.com/nim/riva/asr/latest/overview.html) — the models
+  addressed by `stt.model` and `stt.function_id`.
+- [NVIDIA Riva TTS NIM Service](https://docs.nvidia.com/nim/riva/tts/latest/overview.html) — the models and
+  voices addressed by `tts.model`, `tts.function_id`, and `tts.voice_id`.
+
+For a larger worked example that wires several NIM endpoints together, refer to the
+[Nemotron Voice Agent blueprint](https://github.com/NVIDIA-AI-Blueprints/nemotron-voice-agent).

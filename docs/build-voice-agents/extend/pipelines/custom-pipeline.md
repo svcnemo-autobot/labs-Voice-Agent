@@ -101,13 +101,58 @@ Everything outside the connection and RTVI contracts can be adapted to the agent
 |---|---|
 | Services | Any speech-to-text (STT), large language model (LLM), text-to-speech (TTS), or voice activity detection (VAD) service that emits and consumes Pipecat frames. Wrap a non-Pipecat service in a `FrameProcessor` subclass. |
 | Pipeline shape | Extra processors, reordered stages, parallel branches. Only `transport.input()`, `transport.output()`, and the `RTVIProcessor` have fixed roles. |
-| Context | `build_context_and_aggregators()` returns `(context, user_agg, assistant_agg, original_messages)`. Substitute your own as long as the aggregators honor Pipecat's frame protocol. |
+| Context | `build_context_and_aggregators()` returns `(context, user_agg, assistant_agg, original_messages)`. Substitute your own as long as the aggregators honor Pipecat's frame protocol. Build the pair with `LLMContextAggregatorPair(context, ...)` from `pipecat.processors.aggregators.llm_response_universal` and take `.user()` and `.assistant()` off it, or pass duck-typed equivalents of Pipecat's `LLMUserAggregator` and `LLMAssistantAggregator`. To alter the context shape, subclass the universal `LLMContext` from `pipecat.processors.aggregators.llm_context`, which the stock builder constructs as `LLMContext(messages=messages)`. |
 | Observers | `PipelineWorker` takes an `observers` list; the stock bots attach the repo's `RTVIObserver` subclass, `RTVIAudioLoggerObserver`, and Pipecat's `UserBotLatencyObserver`. |
 | Reasoning, tool parsers, logits processors | Entirely outside the contract. |
 
 Pass your turn-taking service to `build_context_and_aggregators()` if you use it. In Pipecat 1.0+, the
 pipeline permits exactly one component to emit user-speaking frames, and that argument determines the component. Omitting it derives
-the answer again from `turn_taking.enabled`, which is incorrect for a bot that builds the service inline.
+the answer again from `turn_taking.type`, which is incorrect for a bot that builds the service inline. When
+that key is `speech_timeout`, the builder gives the aggregator a `SpeechTimeoutUserTurnStopStrategy`
+configured with `turn_taking.user_speech_timeout`. With `stt.type: nemo_speechlm` and a non-omni LLM, it uses
+the `SegmentedSTTUserTurnStopStrategy` subclass instead. On either path, the builder also passes
+`turn_taking.user_turn_stop_timeout`, which is `None` unless you set it, so Pipecat's user-turn watchdog is off.
+An aggregator pair that you build yourself keeps Pipecat's 5.0-second `LLMUserAggregatorParams` default unless
+you pass `user_turn_stop_timeout=None`. For an omni LLM behind `UserAudioBuffer`, also set
+`wait_for_transcript=False` on each stop strategy, as the builder does. Refer to [The Builder API](builders.md).
+
+### Stop Strategy for Offline SpeechLM Transcription
+
+`NemoSpeechLMSTTService`, the offline speech language model (SpeechLM) backend, transcribes each VAD segment
+after the segment ends. When your pipeline uses it with its own `LLMContextAggregatorPair` and VAD-driven
+turns, pass `SegmentedSTTUserTurnStopStrategy` from `nemo_voice_agent.pipecat.turns` as the stop strategy.
+Pipecat's `SpeechTimeoutUserTurnStopStrategy` can end a turn before the segment after a mid-utterance pause is
+transcribed, which moves that text into the next user message. The replacement takes the same arguments plus
+`pending_transcript_timeout`, which defaults to 10 seconds. That timeout is a backstop for a transcription
+that never returns.
+
+The following example builds the aggregator pair for an existing `LLMContext` named `context`:
+
+```python
+from pipecat.processors.aggregators.llm_response_universal import (
+    LLMContextAggregatorPair,
+    LLMUserAggregatorParams,
+)
+from pipecat.turns.user_start import VADUserTurnStartStrategy
+from pipecat.turns.user_turn_strategies import UserTurnStrategies
+
+from nemo_voice_agent.pipecat.turns import SegmentedSTTUserTurnStopStrategy
+
+user_params = LLMUserAggregatorParams(
+    user_turn_strategies=UserTurnStrategies(
+        start=[VADUserTurnStartStrategy()],
+        stop=[SegmentedSTTUserTurnStopStrategy(user_speech_timeout=0.6, pending_transcript_timeout=10.0)],
+    ),
+    user_turn_stop_timeout=None,  # keep Pipecat's user-turn watchdog off, as the builder does
+)
+context_aggregator = LLMContextAggregatorPair(context, user_params=user_params)
+user_agg, assistant_agg = context_aggregator.user(), context_aggregator.assistant()
+```
+
+The strategy works only with an STT service that pushes one `STTSegmentDoneFrame` per VAD stop.
+`NemoSpeechLMSTTService` does, and the streaming STT services do not. Do not use it with an omni LLM either,
+because `UserAudioBuffer` consumes every transcript before the aggregator. For the counting rules, refer to
+[Multi-Segment Turns](../../../about/core-concepts/speech-pipeline/turn-taking.md#multi-segment-turns).
 
 ## Skeleton
 
